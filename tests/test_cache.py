@@ -127,11 +127,12 @@ def test_fast_rerotate_matches_reference():
 
 # ------------------------------------------------------------------ after eviction
 
-def _eviction_check(model, ids, n_sink, window, rerotate_keys=True, prefill=16, use_triton=None):
+def _eviction_check(model, ids, n_sink, window, rerotate_keys=True, prefill=16, use_triton=None,
+                    key_dtype=None):
     """Next-token logits from the sink cache vs. the kept-tokens reference."""
     rec = PreRopeRecorder(model)
     cache = SinkCache.from_model(model, n_sink=n_sink, window=window, rerotate_keys=rerotate_keys,
-                                 use_triton=use_triton)
+                                 use_triton=use_triton, key_dtype=key_dtype)
     stream(model, ids[:, :-1], cache, prefill=prefill)
     rec.remove()
     ref = kept_tokens_reference(model, rec, ids.shape[1] - 1, n_sink, window)
@@ -172,6 +173,18 @@ def test_eviction_equals_attention_over_kept_tokens_bf16(model_bf16, text_ids, n
     assert agree == 1.0
     assert kerr < 2e-2
     assert err < 0.5
+
+
+def test_fp32_key_storage_removes_drift(model_bf16, text_ids):
+    """Ablation knob: with fp32 key storage the accumulated re-rotation error collapses to about
+    one bf16 rounding (the reference itself is rotated once in bf16 by HF)."""
+    _, _, _, snap16 = _eviction_check(model_bf16, text_ids[:, :301], 4, 60)
+    _, _, _, snap32 = _eviction_check(model_bf16, text_ids[:, :301], 4, 60, key_dtype=torch.float32)
+    rel = lambda snap: max(((ka.float() - kb.float()).norm() / kb.float().norm()).item()
+                           for ka, _, kb, _ in snap)
+    e16, e32 = rel(snap16), rel(snap32)
+    print(f"key drift bf16 storage {e16:.2e}, fp32 storage {e32:.2e}")
+    assert e32 < e16 / 3 and e32 < 5e-3
 
 
 def test_stale_rotation_is_caught(model_fp32, text_ids):

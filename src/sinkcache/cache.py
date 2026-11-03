@@ -58,7 +58,7 @@ class SinkLayer(CacheLayerMixin):
     is_croppable = False    # evicted tokens are gone; there is nothing to roll back to
 
     def __init__(self, n_sink: int, window: int, inv_freq: torch.Tensor, rerotate_keys: bool = True,
-                 use_triton: bool | None = None):
+                 use_triton: bool | None = None, key_dtype: torch.dtype | None = None):
         super().__init__()
         if n_sink < 0 or window < 1:
             raise ValueError(f"need n_sink >= 0 and window >= 1, got {n_sink}, {window}")
@@ -71,6 +71,9 @@ class SinkLayer(CacheLayerMixin):
         self.tokens_seen = 0
         self.tokens_evicted = 0
         self.use_triton = use_triton    # None: use the fused kernel when it applies
+        # Storage dtype for keys (default: the model's). float32 is an ablation: re-rotation then
+        # accumulates fp32 instead of bf16 rounding, and attention reads a bf16 copy each step.
+        self.key_dtype = key_dtype
         self._rot: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
         self._kbuf = self._vbuf = None
 
@@ -78,6 +81,7 @@ class SinkLayer(CacheLayerMixin):
 
     def lazy_initialization(self, key_states, value_states):
         self.dtype, self.device = key_states.dtype, key_states.device
+        self.key_dtype = self.key_dtype or self.dtype
         self.inv_freq = self.inv_freq.to(self.device)
         self._alloc(key_states, self.capacity + 1)
         self._rotation(1)  # the steady-state shift; built now so a graph capture never builds it
@@ -90,7 +94,7 @@ class SinkLayer(CacheLayerMixin):
 
     def _alloc(self, like, slots):
         b, h, _, d = like.shape
-        k = torch.empty(b, h, slots, d, dtype=self.dtype, device=self.device)
+        k = torch.empty(b, h, slots, d, dtype=self.key_dtype, device=self.device)
         v = torch.empty(b, h, slots, d, dtype=self.dtype, device=self.device)
         if self.length:
             k[:, :, :self.length] = self._kbuf[:, :, :self.length]
@@ -154,7 +158,7 @@ class SinkLayer(CacheLayerMixin):
         self._vbuf[:, :, self.length:end].copy_(value_states)
         self.length = end
         self.tokens_seen += q
-        self.keys, self.values = self._kbuf[:, :, :end], self._vbuf[:, :, :end]
+        self.keys, self.values = self._kbuf[:, :, :end].to(self.dtype), self._vbuf[:, :, :end]
         # This step's attention sees everything, at positions that match the queries.
         return self.keys, self.values
 
@@ -176,7 +180,7 @@ class SinkLayer(CacheLayerMixin):
         if drop <= 0:
             return k, v
         wk = k[:, :, s + drop:]
-        wk = (self._rerotate(wk, drop) if self.rerotate_keys else wk.float()).to(self.dtype)
+        wk = (self._rerotate(wk, drop) if self.rerotate_keys else wk.float()).to(self.key_dtype)
         return torch.cat((k[:, :, :s], wk), -2), torch.cat((v[:, :, :s], v[:, :, s + drop:]), -2)
 
     def reset(self) -> None:
@@ -212,8 +216,10 @@ class SinkCache(Cache):
     """
 
     def __init__(self, n_sink: int, window: int, inv_freq: torch.Tensor, num_layers: int,
-                 rerotate_keys: bool = True, use_triton: bool | None = None):
-        layers = [SinkLayer(n_sink, window, inv_freq, rerotate_keys, use_triton) for _ in range(num_layers)]
+                 rerotate_keys: bool = True, use_triton: bool | None = None,
+                 key_dtype: torch.dtype | None = None):
+        layers = [SinkLayer(n_sink, window, inv_freq, rerotate_keys, use_triton, key_dtype)
+                  for _ in range(num_layers)]
         super().__init__(layers=layers)
         self.n_sink, self.window = n_sink, window
 
