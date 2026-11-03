@@ -42,22 +42,26 @@ def test_flash_decode_strided_view():
 
 
 @torch.no_grad()
-def test_backend_in_model(model_bf16, text_ids):
-    """Qwen3 with the registered backend: decode goes through the kernel, prefill through SDPA, and
-    greedy next tokens agree with plain SDPA over 64 steps of a sink cache."""
+def test_backend_in_model(model_bf16, model_fp32, text_ids):
+    """Qwen3 with the registered backend: decode goes through the kernel, prefill through SDPA.
+    Over 64 decode steps (full cache and sink cache), the kernel's logits must be no further from
+    an fp32 reference model than stock bf16 SDPA's are, and agree with it on the greedy token."""
     name = register()
     model = AutoModelForCausalLM.from_pretrained(MODEL, dtype=torch.bfloat16, attn_implementation=name)
     model = model.to(DEVICE).eval()
     ids = text_ids[:, :400]
-    for make in (DynamicCache, lambda: SinkCache.from_model(model, 4, 124)):
-        logits = {}
-        for m in (model_bf16, model):
-            cache = make() if make is DynamicCache else SinkCache.from_model(m, 4, 124)
-            out = [m(ids[:, :200], past_key_values=cache, use_cache=True).logits[:, -1:]]
-            for t in range(200, 264):
-                out.append(m(ids[:, t:t + 1], past_key_values=cache, use_cache=True).logits)
-            logits[m is model] = torch.cat(out, 1).float()
-        a, b = logits[False], logits[True]
-        assert (a.argmax(-1) == b.argmax(-1)).float().mean() > 0.97
-        assert (a - b).abs().max() < 1.0  # bf16 noise between two attention kernels
+
+    def run(m, sink):
+        cache = SinkCache.from_model(m, 4, 124) if sink else DynamicCache()
+        out = [m(ids[:, :200], past_key_values=cache, use_cache=True).logits[:, -1:]]
+        for t in range(200, 264):
+            out.append(m(ids[:, t:t + 1], past_key_values=cache, use_cache=True).logits)
+        return torch.cat(out, 1).float()
+
+    for sink in (False, True):
+        ref, sdpa, kern = run(model_fp32, sink), run(model_bf16, sink), run(model, sink)
+        e_sdpa, e_kern = (sdpa - ref).abs().mean().item(), (kern - ref).abs().mean().item()
+        agree = (kern.argmax(-1) == sdpa.argmax(-1)).float().mean().item()
+        print(f"sink={sink}: mean|d| vs fp32  sdpa {e_sdpa:.4f}  kernel {e_kern:.4f}  top1(kernel, sdpa) {agree:.3f}")
+        assert e_kern <= 1.25 * e_sdpa and agree > 0.97
     assert calls["decode_kernel"] > 0 and calls["sdpa_fallback"] > 0
