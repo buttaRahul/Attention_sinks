@@ -22,12 +22,17 @@ class StreamRunner:
         self.use_graph = use_graph and isinstance(cache, SinkCache) and torch.cuda.is_available()
         self.graph = None
         self.static_ids = self.static_logits = None
+        self._buffers = None
 
     @torch.no_grad()
     def step(self, ids: torch.Tensor) -> torch.Tensor:
-        """Feed ids of shape [batch, 1]; returns logits [batch, 1, vocab].
+        """Feed ids of shape [batch, q]; returns logits [batch, q, vocab]. One-token steps on a
+        steady SinkCache are graph-replayed; anything else runs eagerly (and may reallocate the
+        cache buffers, which invalidates the graph: it is then recaptured).
         When graphed, the returned tensor is overwritten by the next step: consume it first."""
-        if self.graph is not None:
+        if self.graph is not None and self._buffer_ptrs() != self._buffers:
+            self.graph = None  # buffers were reallocated (e.g. a multi-token chunk): recapture
+        if self.graph is not None and ids.shape[-1] == 1:
             self.static_ids.copy_(ids)
             self.graph.replay()
             for layer in self.cache.layers:  # Python-side counters don't advance inside a replay
@@ -40,7 +45,11 @@ class StreamRunner:
             return self.static_logits
         return self.model(ids, past_key_values=self.cache, use_cache=True).logits
 
+    def _buffer_ptrs(self):
+        return [(l._kbuf.data_ptr(), l._vbuf.data_ptr()) for l in self.cache.layers]
+
     def _capture(self, ids):
+        self._buffers = self._buffer_ptrs()
         self.static_ids = ids.clone()
         self.graph = torch.cuda.CUDAGraph()
         torch.cuda.synchronize()

@@ -222,3 +222,22 @@ def test_cuda_graph_replay_matches_eager(model_bf16, text_ids):
     assert runner.graph is not None
     assert cache.tokens_seen == 260 and cache.tokens_evicted == 260 - 65
     torch.testing.assert_close(torch.cat(out, 1), eager, rtol=0, atol=0)
+
+
+def test_cuda_graph_survives_chunks(model_bf16, text_ids):
+    """Multi-token chunks (chat turns) reallocate the buffers between graphed steps; the runner must
+    notice and recapture rather than replay into freed memory."""
+    from sinkcache import StreamRunner
+    ids = text_ids[:, :400]
+    plan = [16] + [1] * 120 + [30] + [1] * 80 + [45] + [1] * 100   # prefill, steps, chunk, steps, ...
+    outs = {}
+    for graphed in (False, True):
+        cache = SinkCache.from_model(model_bf16, n_sink=4, window=60)
+        runner = StreamRunner(model_bf16, cache, use_graph=graphed)
+        out, t = [], 0
+        with torch.no_grad():
+            for n in plan:
+                out.append(runner.step(ids[:, t:t + n]).float().clone())
+                t += n
+        outs[graphed] = torch.cat(out, 1)
+    torch.testing.assert_close(outs[True], outs[False], rtol=0, atol=0)
