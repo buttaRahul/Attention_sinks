@@ -60,13 +60,14 @@ def pg19_tokens(tokenizer, model_key: str, n_tokens: int) -> torch.Tensor:
     return out
 
 
-CONFIG_RE = re.compile(r"^(full|sink(\d+)_w(\d+)(_norot)?(_fp32k)?)$")
+CONFIG_RE = re.compile(r"^(full|sink(\d+)_w(\d+)(_norot)?(_bf16k)?)$")
 
 
 def make_cache(spec: str, model):
     """'full' -> DynamicCache (HF's default cache);
     'sink{n}_w{w}' -> SinkCache(n_sink=n, window=w), so 'sink0_w1024' is window-only;
-    suffix '_norot' disables re-rotation (the position bug), '_fp32k' stores keys in fp32."""
+    suffix '_norot' disables re-rotation (the position bug), '_bf16k' stores keys in bf16 instead of
+    the fp32 default (shows the accumulated re-rotation drift)."""
     m = CONFIG_RE.match(spec)
     if not m:
         raise ValueError(f"bad cache spec {spec!r}")
@@ -74,5 +75,5 @@ def make_cache(spec: str, model):
         return DynamicCache()
     return SinkCache.from_model(model, n_sink=int(m.group(2)), window=int(m.group(3)),
                                 rerotate_keys=m.group(4) is None,
-                                key_dtype=torch.float32 if m.group(5) else None)
+                                key_dtype=None if m.group(5) else torch.float32)
 

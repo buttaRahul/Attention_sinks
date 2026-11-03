@@ -164,8 +164,9 @@ def test_eviction_equals_attention_over_kept_tokens_fp32(model_fp32, text_ids, n
 
 @pytest.mark.parametrize("n_sink", [0, 4])
 def test_eviction_equals_attention_over_kept_tokens_bf16(model_bf16, text_ids, n_sink):
-    """bf16: same check; the difference is re-rotation rounding accumulated in bf16 storage."""
-    got, want, cache, snap = _eviction_check(model_bf16, text_ids[:, :301], n_sink, 60)
+    """bf16 model, bf16 key storage: same check; the difference is re-rotation rounding
+    accumulated in bf16 storage (the drift the fp32 default removes)."""
+    got, want, cache, snap = _eviction_check(model_bf16, text_ids[:, :301], n_sink, 60, key_dtype=None)
     err = (got - want).abs().max().item()
     agree = (got.argmax(-1) == want.argmax(-1)).float().mean().item()
     kerr = max(((ka.float() - kb.float()).norm() / kb.float().norm()).item() for ka, _, kb, _ in snap)
@@ -176,9 +177,9 @@ def test_eviction_equals_attention_over_kept_tokens_bf16(model_bf16, text_ids, n
 
 
 def test_fp32_key_storage_removes_drift(model_bf16, text_ids):
-    """Ablation knob: with fp32 key storage the accumulated re-rotation error collapses to about
+    """bf16 storage (key_dtype=None) vs the fp32 default: with fp32 key storage the accumulated re-rotation error collapses to about
     one bf16 rounding (the reference itself is rotated once in bf16 by HF)."""
-    _, _, _, snap16 = _eviction_check(model_bf16, text_ids[:, :301], 4, 60)
+    _, _, _, snap16 = _eviction_check(model_bf16, text_ids[:, :301], 4, 60, key_dtype=None)
     _, _, _, snap32 = _eviction_check(model_bf16, text_ids[:, :301], 4, 60, key_dtype=torch.float32)
     rel = lambda snap: max(((ka.float() - kb.float()).norm() / kb.float().norm()).item()
                            for ka, _, kb, _ in snap)

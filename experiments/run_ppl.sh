@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Experiment 1 sweep. Each config is its own process; finished configs (json present) are skipped.
-# Usage: bash experiments/run_ppl.sh [sinks|full|llama|all]
+# Usage: bash experiments/run_ppl.sh [sinks|bf16|full|llama|all]
 set -u
 cd "$(dirname "$0")"
 PY=${PY:-../.venv/Scripts/python.exe}
@@ -21,7 +21,16 @@ if [[ $what == sinks || $what == all ]]; then
     run qwen3-0.6b sink0_w$w 16384
   done
   run qwen3-0.6b sink4_w1020_norot 16384
-  run qwen3-0.6b sink4_w1020_fp32k 16384
+fi
+if [[ $what == bf16 || $what == all ]]; then
+  # same sweep with keys stored in bf16: shows the accumulated re-rotation drift
+  run qwen3-0.6b sink4_w1020_bf16k 65536
+  run qwen3-0.6b sink0_w1024_bf16k 65536
+  for s in 0 1 2 8; do run qwen3-0.6b sink${s}_w1020_bf16k 16384; done
+  for w in 256 512 2048; do
+    run qwen3-0.6b sink4_w$((w - 4))_bf16k 16384
+    run qwen3-0.6b sink0_w${w}_bf16k 16384
+  done
 fi
 if [[ $what == full || $what == all ]]; then
   run qwen3-0.6b full 65536         # until OOM

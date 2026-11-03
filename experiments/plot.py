@@ -33,10 +33,11 @@ plt.rcParams.update({
 
 LABEL = {
     "full": "full cache", "sink0_w1024": "window only (1,024)", "sink4_w1020": "4 sinks + 1,020 window",
-    "sink4_w1020_norot": "4 + 1,020, no re-rotation", "sink4_w1020_fp32k": "4 + 1,020, fp32 keys",
+    "sink4_w1020_norot": "4 + 1,020, no re-rotation", "sink4_w1020_bf16k": "4 + 1,020, bf16 keys",
+    "sink0_w1024_bf16k": "window only, bf16 keys",
 }
 COLOR = {"full": BLUE, "sink0_w1024": ORANGE, "sink4_w1020": AQUA,
-         "sink4_w1020_norot": MAGENTA, "sink4_w1020_fp32k": YELLOW}
+         "sink4_w1020_norot": MAGENTA, "sink4_w1020_bf16k": YELLOW, "sink0_w1024_bf16k": MAGENTA}
 tables: list[str] = []
 
 
@@ -122,7 +123,7 @@ def plot_ablations():
     windows = []
     for w in [256, 512, 1024, 2048]:
         a, b = load(f"sink4_w{w - 4}"), load(f"sink0_w{w}")
-        windows.append((w, a, b))
+        windows.append((w, a, b, load(f"sink4_w{w - 4}_bf16k")))
     full = load("full")
     ref = mean_nll(full[0], lo, hi) if full else None
 
@@ -143,7 +144,8 @@ def plot_ablations():
         ax.set_ylabel(f"perplexity, tokens {lo // 1024}K–{hi // 1024}K (log scale)")
         ax.set_title("How many sinks?")
     ax = axes[1]
-    for key, idx, color, name in [("sinks", 1, AQUA, "4 sinks + window"), ("window", 2, ORANGE, "window only")]:
+    for key, idx, color, name in [("sinks", 1, AQUA, "4 sinks + window"), ("window", 2, ORANGE, "window only"),
+                                  ("bf16", 3, YELLOW, "4 sinks, bf16 keys")]:
         pts = [(w, math.exp(mean_nll(t[idx][0], lo, hi))) for t in windows for w in [t[0]] if t[idx] is not None]
         if pts:
             ax.plot([p[0] for p in pts], [p[1] for p in pts], "o-", color=color, ms=8)
@@ -161,17 +163,17 @@ def plot_ablations():
     fig.savefig(RES / "ablations.png", dpi=150)
     plt.close(fig)
 
-    rows = [f"| sinks (window 1,020) | ppl {lo // 1024}K–{hi // 1024}K |", "|---:|---:|"]
-    rows += [f"| {s} | {math.exp(mean_nll(r[0], lo, hi)):.2f} |" for s, r in sinks]
+    f = lambda r: f"{math.exp(mean_nll(r[0], lo, hi)):.2f}" if r else "–"
+    rows = [f"| sinks (window 1,020) | ppl {lo // 1024}K–{hi // 1024}K | bf16 keys |", "|---:|---:|---:|"]
+    rows += [f"| {sc} | {f(load(f'sink{sc}_w1020'))} | {f(load(f'sink{sc}_w1020_bf16k'))} |" for sc in [0, 1, 2, 4, 8]]
     if ref is not None:
-        rows.append(f"| full cache | {math.exp(ref):.2f} |")
-    t2 = [f"| cache size | 4 sinks + window | window only |", "|---:|---:|---:|"]
-    for w, a, b in windows:
-        fa = f"{math.exp(mean_nll(a[0], lo, hi)):.2f}" if a else "–"
-        fb = f"{math.exp(mean_nll(b[0], lo, hi)):.2f}" if b else "–"
-        t2.append(f"| {w:,} | {fa} | {fb} |")
+        rows.append(f"| full cache | {math.exp(ref):.2f} | |")
+    t2 = ["| cache size | 4 sinks + window | window only | 4 sinks, bf16 keys | window only, bf16 keys |",
+          "|---:|---:|---:|---:|---:|"]
+    for w, a, b, c in windows:
+        t2.append(f"| {w:,} | {f(a)} | {f(b)} | {f(c)} | {f(load(f'sink0_w{w}_bf16k'))} |")
     extra = ["| variant (4 + 1,020) | ppl 2K–16K |", "|---|---:|"]
-    for cfg in ["sink4_w1020", "sink4_w1020_fp32k", "sink4_w1020_norot"]:
+    for cfg in ["sink4_w1020", "sink4_w1020_bf16k", "sink4_w1020_norot"]:
         r = load(cfg)
         if r:
             extra.append(f"| {LABEL[cfg]} | {math.exp(mean_nll(r[0], lo, hi)):.3f} |")

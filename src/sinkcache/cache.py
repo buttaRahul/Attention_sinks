@@ -71,8 +71,10 @@ class SinkLayer(CacheLayerMixin):
         self.tokens_seen = 0
         self.tokens_evicted = 0
         self.use_triton = use_triton    # None: use the fused kernel when it applies
-        # Storage dtype for keys (default: the model's). float32 is an ablation: re-rotation then
-        # accumulates fp32 instead of bf16 rounding, and attention reads a bf16 copy each step.
+        # Storage dtype for keys (None: the model's). Every window key is re-rotated once per step and
+        # rounded to this dtype each time, so the error random-walks (~sqrt(window) roundings). In
+        # bf16 that measurably hurts perplexity at windows >= 1K; SinkCache defaults to float32
+        # (attention then reads a bf16 copy each step).
         self.key_dtype = key_dtype
         self._rot: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
         self._kbuf = self._vbuf = None
@@ -213,11 +215,13 @@ class SinkCache(Cache):
     `n_sink=0` gives a plain sliding window with the same eviction and re-rotation.
     `rerotate_keys=False` keeps stale rotations: the classic position bug, kept for ablation.
     `use_triton`: fused in-place eviction kernel (default: when on CUDA with triton and full rotary).
+    `key_dtype`: key storage dtype. float32 by default: bf16 storage accumulates one rounding per
+    re-rotation per step (see README); `key_dtype=None` stores keys in the model dtype.
     """
 
     def __init__(self, n_sink: int, window: int, inv_freq: torch.Tensor, num_layers: int,
                  rerotate_keys: bool = True, use_triton: bool | None = None,
-                 key_dtype: torch.dtype | None = None):
+                 key_dtype: torch.dtype | None = torch.float32):
         layers = [SinkLayer(n_sink, window, inv_freq, rerotate_keys, use_triton, key_dtype)
                   for _ in range(num_layers)]
         super().__init__(layers=layers)
