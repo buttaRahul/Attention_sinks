@@ -1,0 +1,12 @@
+{
+ "config": "sink4_w2044",
+ "model": "qwen3-0.6b",
+ "tokens": 16384,
+ "oom_at": null,
+ "seconds": 248.3,
+ "graph": true,
+ "weights_mib": 1137.0,
+ "kv_bytes_per_token": 114688,
+ "peak_mib": 1605.8,
+ "total_vram_mib": 8188
+}

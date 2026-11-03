@@ -10,6 +10,7 @@ import math
 from pathlib import Path
 
 import matplotlib
+import matplotlib.ticker
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -35,6 +36,7 @@ LABEL = {
     "full": "full cache", "sink0_w1024": "window only (1,024)", "sink4_w1020": "4 sinks + 1,020 window",
     "sink4_w1020_norot": "4 + 1,020, no re-rotation", "sink4_w1020_bf16k": "4 + 1,020, bf16 keys",
     "sink0_w1024_bf16k": "window only, bf16 keys",
+    "sink4_w1020_norot_bf16k": "4 + 1,020, no re-rotation (bf16 keys)",
 }
 COLOR = {"full": BLUE, "sink0_w1024": ORANGE, "sink4_w1020": AQUA,
          "sink4_w1020_norot": MAGENTA, "sink4_w1020_bf16k": YELLOW, "sink0_w1024_bf16k": MAGENTA}
@@ -79,10 +81,13 @@ def plot_main():
         label_end(ax, x[-1], y[-1], LABEL[cfg] + (f"  (OOM at {meta['oom_at']:,})" if meta.get("oom_at") else ""),
                   COLOR[cfg])
     ax.axvline(40960, color=INK2, lw=1, ls=":")
-    ax.text(40960, ax.get_ylim()[1], " Qwen3 max_position_embeddings", va="top", fontsize=8, color=INK2)
-    ax.set_yscale("log")
+    ax.set_ylim(2.5, 7.9)
+    ax.text(40960, 7.9, " Qwen3 max_position_embeddings", va="top", fontsize=8, color=INK2)
+    ax.axvline(57722, color=INK2, lw=1, ls=":")
+    ax.text(57722, 7.6, " PG19 book 2 starts", va="top", fontsize=8, color=INK2)
+    ax.set_ylim(bottom=2.5)
     ax.set_xlabel("position in stream (tokens)")
-    ax.set_ylabel("NLL per token (nats, log scale), 1K buckets")
+    ax.set_ylabel("mean NLL per token (nats), 1,024-token buckets")
     ax.set_title("Streaming PG19 through Qwen3-0.6B, one token at a time, 1,024-token cache")
     ax.legend(loc="upper left")
     ax.set_xlim(0, 65536 * 1.22)
@@ -138,8 +143,12 @@ def plot_ablations():
                         textcoords="offset points", ha="center", fontsize=9, color=INK)
         if ref is not None:
             ax.axhline(math.exp(ref), color=BLUE, lw=1.5, ls="--")
-            ax.text(len(xs) - 0.5, math.exp(ref), "full cache", color=INK2, fontsize=8, va="bottom", ha="right")
+            ax.text(len(xs) - 0.55, math.exp(ref), " full cache", color=INK2, fontsize=8, va="center")
+            ax.set_xlim(-0.6, len(xs) + 0.3)
         ax.set_yscale("log")
+        ax.set_yticks([20, 30, 50, 100, 200, 300, 500])
+        ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:g}"))
+        ax.yaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
         ax.set_xlabel("number of sink tokens (window fixed at 1,020)")
         ax.set_ylabel(f"perplexity, tokens {lo // 1024}K–{hi // 1024}K (log scale)")
         ax.set_title("How many sinks?")
@@ -156,6 +165,9 @@ def plot_ablations():
     ax.set_xscale("log", base=2)
     ax.set_xticks([256, 512, 1024, 2048], ["256", "512", "1,024", "2,048"])
     ax.set_yscale("log")
+    ax.set_yticks([20, 30, 50, 100, 200, 300, 500])
+    ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:g}"))
+    ax.yaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
     ax.set_xlim(200, 4500)
     ax.set_xlabel("total cache size (tokens)")
     ax.set_title("Cache size, with and without sinks")
@@ -173,7 +185,7 @@ def plot_ablations():
     for w, a, b, c in windows:
         t2.append(f"| {w:,} | {f(a)} | {f(b)} | {f(c)} | {f(load(f'sink0_w{w}_bf16k'))} |")
     extra = ["| variant (4 + 1,020) | ppl 2K–16K |", "|---|---:|"]
-    for cfg in ["sink4_w1020", "sink4_w1020_bf16k", "sink4_w1020_norot"]:
+    for cfg in ["sink4_w1020", "sink4_w1020_bf16k", "sink4_w1020_norot_bf16k"]:
         r = load(cfg)
         if r:
             extra.append(f"| {LABEL[cfg]} | {math.exp(mean_nll(r[0], lo, hi)):.3f} |")
@@ -197,12 +209,15 @@ def plot_memory():
         kvb, base = meta["kv_bytes_per_token"], meta["weights_mib"]
         data[cfg] = (df, meta)
         ax.plot(df.tokens, df.allocated_mib / 1024, color=COLOR[cfg])
-        label_end(ax, df.tokens.iloc[-1], df.allocated_mib.iloc[-1] / 1024,
-                  LABEL[cfg] + (f"  (OOM at {meta['oom_at']:,})" if meta.get("oom_at") else ""), COLOR[cfg])
+        if cfg == "sink0_w1024":
+            continue  # identical to the sink line (same cache size): one shared label below
+        text = (LABEL[cfg] + (f"  (OOM at {meta['oom_at']:,})" if meta.get("oom_at") else "")
+                if cfg != "sink4_w1020" else "4 sinks + 1,020 and window only (identical)")
+        label_end(ax, df.tokens.iloc[-1], df.allocated_mib.iloc[-1] / 1024, text, COLOR[cfg])
     if kvb:
         xs = [0, 65536]
         ax.plot(xs, [(base + x * kvb / 2**20) / 1024 for x in xs], color=INK2, lw=1, ls="--")
-        ax.text(15000, (base + 15000 * kvb / 2**20) / 1024, "weights + 112 KiB/token (theory) ",
+        ax.text(30000, (base + 30000 * kvb / 2**20) / 1024 + 0.15, "weights + 112 KiB/token (theory) ",
                 color=INK2, fontsize=8, ha="right", va="bottom")
         total = json.loads((PPL / "full.json").read_text())["total_vram_mib"] if (PPL / "full.json").exists() else 8188
         ax.axhline(total / 1024, color=INK2, lw=1, ls=":")
@@ -290,9 +305,13 @@ def plot_chat():
     for cfg, turns in runs.items():
         t = [x["turn"] for x in turns]
         axes[0].plot(t, [x["alloc_mib"] for x in turns], color=COLOR[cfg])
-        label_end(axes[0], t[-1], turns[-1]["alloc_mib"], LABEL[cfg], COLOR[cfg])
+        if cfg != "sink0_w1024":
+            label_end(axes[0], t[-1], turns[-1]["alloc_mib"],
+                      "sinks and window only" if cfg == "sink4_w1020" else LABEL[cfg], COLOR[cfg])
         axes[1].plot(t, [x["cache_len"] for x in turns], color=COLOR[cfg])
-        label_end(axes[1], t[-1], turns[-1]["cache_len"], LABEL[cfg], COLOR[cfg])
+        if cfg != "sink0_w1024":
+            label_end(axes[1], t[-1], turns[-1]["cache_len"],
+                      "sinks and window only" if cfg == "sink4_w1020" else LABEL[cfg], COLOR[cfg])
     axes[0].set_ylabel("allocated GPU memory (MiB)")
     axes[1].set_ylabel("tokens in cache")
     for ax in axes:

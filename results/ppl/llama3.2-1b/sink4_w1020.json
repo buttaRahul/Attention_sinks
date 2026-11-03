@@ -1,0 +1,12 @@
+{
+ "config": "sink4_w1020",
+ "model": "llama3.2-1b",
+ "tokens": 16384,
+ "oom_at": null,
+ "seconds": 201.4,
+ "graph": true,
+ "weights_mib": 2358.3,
+ "kv_bytes_per_token": 32768,
+ "peak_mib": 2442.7,
+ "total_vram_mib": 8188
+}

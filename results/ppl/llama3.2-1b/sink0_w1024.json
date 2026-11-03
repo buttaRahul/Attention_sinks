@@ -1,0 +1,12 @@
+{
+ "config": "sink0_w1024",
+ "model": "llama3.2-1b",
+ "tokens": 16384,
+ "oom_at": null,
+ "seconds": 244.6,
+ "graph": true,
+ "weights_mib": 2358.3,
+ "kv_bytes_per_token": 32768,
+ "peak_mib": 2442.7,
+ "total_vram_mib": 8188
+}
