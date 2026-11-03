@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sinkcache"
+version = "0.1.0"
+description = "Attention-sink KV cache (StreamingLLM) for the Transformers 5 per-layer cache API"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.4",
+    "transformers==5.22.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "matplotlib", "pandas", "datasets", "accelerate"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
