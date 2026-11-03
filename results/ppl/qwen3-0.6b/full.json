@@ -1,0 +1,12 @@
+{
+ "config": "full",
+ "model": "qwen3-0.6b",
+ "tokens": 65536,
+ "oom_at": 50176,
+ "seconds": 3147.9,
+ "graph": true,
+ "weights_mib": 1137.4,
+ "kv_bytes_per_token": 114688,
+ "peak_mib": 6731.9,
+ "total_vram_mib": 8188
+}

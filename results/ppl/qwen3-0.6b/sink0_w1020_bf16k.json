@@ -1,0 +1,12 @@
+{
+ "config": "sink0_w1020",
+ "model": "qwen3-0.6b",
+ "tokens": 16384,
+ "oom_at": null,
+ "seconds": 322.0,
+ "graph": true,
+ "weights_mib": 1137.0,
+ "kv_bytes_per_token": 114688,
+ "peak_mib": 1266.7,
+ "total_vram_mib": 8188
+}
