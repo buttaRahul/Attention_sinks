@@ -20,10 +20,22 @@ MODELS = {
 }
 
 
+def cap_to_physical_vram(margin_mib: int = 256) -> None:
+    """Make PyTorch raise a real OOM at the card's physical VRAM.
+
+    On Windows the NVIDIA driver's "sysmem fallback" silently pages VRAM out to system RAM
+    once the card is full, so a growing cache never OOMs: it slows ~10x and eats host RAM.
+    Capping the caching allocator at what is actually free keeps every measurement on-device."""
+    free, total = torch.cuda.mem_get_info()
+    cap = torch.cuda.memory_reserved() + free - margin_mib * 2**20
+    torch.cuda.set_per_process_memory_fraction(cap / total)
+
+
 def load_model(key: str, dtype=torch.bfloat16, attn: str = "sdpa_decode"):
     """attn='sdpa_decode': Triton flash-decode for one-token steps, SDPA for longer chunks
     (see sinkcache/decode_attention.py for why). Same backend for every cache config."""
     name = MODELS[key]
+    cap_to_physical_vram()
     tok = AutoTokenizer.from_pretrained(name)
     if attn == "sdpa_decode":
         register_decode_attention()

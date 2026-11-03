@@ -40,7 +40,7 @@ def main():
     csv = out_dir / f"{args.config}.csv"
     mem_csv = out_dir / f"{args.config}_mem.csv"
     csv.write_text("pos,nll\n")
-    mem_csv.write_text("tokens,allocated_mib,peak_mib\n")
+    mem_csv.write_text("tokens,allocated_mib,peak_mib,reserved_mib\n")
 
     torch.cuda.reset_peak_memory_stats()
     base_mib = torch.cuda.memory_allocated() / 2**20
@@ -57,8 +57,13 @@ def main():
             f.writelines(f"{written + i + 1},{v:.5f}\n" for i, v in enumerate(vals))
         with mem_csv.open("a") as f:
             f.write(f"{upto},{torch.cuda.memory_allocated() / 2**20:.1f},"
-                    f"{torch.cuda.max_memory_allocated() / 2**20:.1f}\n")
+                    f"{torch.cuda.max_memory_allocated() / 2**20:.1f},"
+                    f"{torch.cuda.memory_reserved() / 2**20:.1f}\n")
         written = upto
+        # A growing DynamicCache frees and re-requests slightly larger blocks every step, which
+        # the caching allocator cannot reuse; hand them back so reserved tracks allocated.
+        if not runner.use_graph:
+            torch.cuda.empty_cache()
 
     with torch.inference_mode():
         for t in range(n - 1):
