@@ -15,12 +15,12 @@ out = model(input_ids, past_key_values=cache, use_cache=True)   # stream forever
 ```
 
 **Headline (Qwen3-0.6B, bf16, RTX 4060 Laptop 8 GB, PG19 streamed one token at a time):**
-a 1,024-token sink cache keeps perplexity **within 5.3% of the full cache** over
-the 50K tokens the full cache survives. The sink cache uses constant memory
-(**1.38 GiB** total, against a full cache that grows **112 KiB/token** and runs out of memory at
-**50,176 tokens**) and constant decode time (**15.3–15.7 ms/token** from 1K to 32K
-tokens, while the full cache's GPU time triples). A window-only cache of the same size is
-**14.4× worse** in perplexity than the full cache.
+over the 40K tokens where the full cache is inside Qwen3's trained position range, a
+1,024-token sink cache is **+6.3% in perplexity** (95% CI +4.7% to +8.2%) against the full cache,
+and the gap grows with distance (+5.5% at 1–8K, +10.0% at 32–40K). A window-only cache of
+the same size is **14.3× worse**. Memory is constant (the full cache grows **112 KiB/token**
+and runs out at **50,176 tokens**). Measured the same way, in GPU kernel time per token, the
+sink cache stays at **22.5–25.1 ms** from 1K to 32K while the full cache goes **20.8 → 62.2 ms**.
 
 ![Perplexity vs position](results/ppl_vs_position.png)
 
@@ -34,17 +34,27 @@ PG19 test books, concatenated in dataset order (book 1 ends at token 57,722).
 Each token is fed through the cache one at a time, and the plot shows the mean NLL of the next
 token per 1,024-token bucket. The three main configs all hold **1,024 tokens** of cache.
 
-| range (tokens) | full cache | 4 sinks + 1,020 window | sinks vs full | window only (1,024) | window vs full |
-|---|---:|---:|---:|---:|---:|
-| 1,024–50,176 (all the full cache survived) | 21.77 | 22.92 | **+5.3%** | 313.0 | **14.4×** |
-| 8,192–32,768 | 20.72 | 21.83 | +5.4% | 294.8 | 14.2× |
-| 32,768–50,176 | 23.25 | 24.44 | +5.1% | 349.8 | 15.0× |
+| range (tokens) | full cache | 4 sinks + 1,020 window | sinks vs full | 95% CI | window only (1,024) | window vs full |
+|---|---:|---:|---:|---:|---:|---:|
+| **1,024–40,960 (full cache in its trained range)** | 20.78 | 22.09 | **+6.3%** | +4.7 to +8.2% | 296.8 | **14.3×** |
+| 1,024–8,192 | 21.96 | 23.16 | +5.5% | +2.6 to +9.2% | 293.4 | 13.4× |
+| 8,192–16,384 | 22.61 | 23.11 | +2.2% | −0.5 to +5.6% | 327.3 | 14.5× |
+| 16,384–32,768 | 19.83 | 21.21 | +7.0% | +5.1 to +9.0% | 279.8 | 14.1× |
+| 32,768–40,960 | 19.95 | 21.95 | +10.0% | +5.4 to +14.7% | 306.0 | 15.3× |
+| 40,960–50,176 (full cache past its trained range) | 26.65 | 26.89 | +0.9% | −5.2 to +9.4% | 393.9 | 14.8× |
+
+CI: paired bootstrap over 1,024-token blocks. The text is one book, so neighbouring tokens are not
+independent samples.
 
 - The window-only cache is identical to the others until token 1,024. From the first
   eviction, perplexity jumps from ~20 to ~290 and stays there.
-- The sink cache tracks the full cache bucket for bucket. The full cache itself
-  degrades past 40,960 tokens, which is Qwen3's `max_position_embeddings`. The sink cache never
-  goes past position 1,024, so position range never limits it.
+- **The gap grows with distance.** The full cache keeps getting more out of long-range context as
+  the book goes on (characters, plot), which a 1,020-token window cannot see. The trend is noisy
+  (the 8–16K bin's CI includes zero), but 32–40K is clearly worse than the start.
+- **Past 40,960 tokens the comparison is unfair to the full cache.** That is Qwen3's
+  `max_position_embeddings`, and the full cache degrades beyond it, so the gap there (+0.9%) mostly
+  measures the full cache breaking. Averaging over all 50K tokens would dilute the headline to +5.3%.
+  The sink cache never goes past position 1,024, so position range never limits it.
 - The step up at ~58K is the start of PG19 book 2, while the cache still holds book 1's last
   pages. The full cache had already run out of memory by then, so there is no baseline for that range.
 
@@ -67,10 +77,11 @@ token per 1,024-token bucket. The three main configs all hold **1,024 tokens** o
   Cache size matters much less than keeping the sink.
 - **Position handling matters:** without re-rotation the same cache scores **47,642**.
 
-**Second model, Llama-3.2-1B** (16K tokens; `unsloth/Llama-3.2-1B`, the same weights as
-the gated Meta repo; it uses `llama3` RoPE scaling, which `find_inv_freq` picks up):
+**Second model, Llama-3.2-1B** (`unsloth/Llama-3.2-1B`, the same weights as
+the gated Meta repo; it uses `llama3` RoPE scaling, which `find_inv_freq` picks up). This run only
+went to **16K tokens**, so it checks that the result transfers, not how the gap behaves at long range:
 
-| | 0–1K | 1K–2K | 2K–16K |
+| Llama-3.2-1B, first 16K tokens only | 0–1K | 1K–2K | 2K–16K |
 |---|---:|---:|---:|
 | full cache | 9.23 | 9.48 | 9.73 |
 | window only (1,024) | 9.23 | 132.60 | 177.28 |
@@ -101,17 +112,27 @@ and logits.
 ![Latency](results/latency_vs_length.png)
 
 Per-token decode at each context length. Three rounds, config order rotated each round,
-medians reported. "GPU time" is the sum of CUDA kernel durations per token (CUPTI). The
-breakdown is by kernel type:
+medians reported. Two metrics, which are **not** comparable with each other:
 
-| config | context | GPU ms/token | range | linear | attention | cache copies | other | sinks, CUDA graph |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| full cache | 1,024 | 20.8 | 20.1–23.9 | 10.4 | 1.7 | 3.1 | 5.5 | |
-| full cache | 8,192 | 27.5 | 27.5–28.9 | 8.0 | 5.0 | 10.6 | 3.9 | |
-| full cache | 16,384 | 36.8 | 36.8–40.6 | 7.0 | 10.2 | 15.8 | 3.9 | |
-| full cache | 32,768 | **62.2** | 61.6–62.5 | 7.0 | 18.3 | **33.1** | 3.9 | |
-| 4 sinks + 1,020 | 1,024 | 22.5 | 19.4–28.2 | 9.9 | 1.6 | 5.9 | 5.2 | **15.3 ms** |
-| 4 sinks + 1,020 | 32,768 | 25.1 | 23.6–27.5 | 11.2 | 1.9 | 6.3 | 5.7 | **15.3 ms** |
+- **GPU time**: the sum of CUDA kernel durations per token (CUPTI), both configs run eagerly.
+  This is the like-for-like comparison: same execution mode, same attention kernel. Broken down
+  by kernel type below.
+- **CUDA-graph wall clock**: only the sink cache can be graph-replayed (see the caveats below),
+  so this number is a separate point about what a fixed-shape cache allows, not a head-to-head.
+
+| config | context | GPU ms/token | range | linear | attention | cache copies | other |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| full cache | 1,024 | 20.8 | 20.1–23.9 | 10.4 | 1.7 | 3.1 | 5.5 |
+| full cache | 8,192 | 27.5 | 27.5–28.9 | 8.0 | 5.0 | 10.6 | 3.9 |
+| full cache | 16,384 | 36.8 | 36.8–40.6 | 7.0 | 10.2 | 15.8 | 3.9 |
+| full cache | 32,768 | **62.2** | 61.6–62.5 | 7.0 | 18.3 | **33.1** | 3.9 |
+| 4 sinks + 1,020 | 1,024 | 22.5 | 19.4–28.2 | 9.9 | 1.6 | 5.9 | 5.2 |
+| 4 sinks + 1,020 | 32,768 | **25.1** | 23.6–27.5 | 11.2 | 1.9 | 6.3 | 5.7 |
+
+On GPU time the sink cache is flat (22.5–27.8 ms at every length, run-to-run noise from laptop
+clocks) and the full cache rises 3×. At 1K the sink cache is *slower*: ~6 ms of its step is the
+"cache copies" column (the eviction kernel re-rotating 1,020 fp32 keys per layer, the value shift,
+and the fp32→bf16 key copy attention reads). [v2](#v2-move-the-sinks-not-the-window) removes it.
 
 **Does it match the memory-bound prediction?** Yes, once you count the bytes HF actually moves.
 Decode reads every weight (1.19 GB) and the whole KV cache once per token. The brief's
@@ -136,10 +157,16 @@ growth (right panel). The GPU also drops its clocks while waiting on the CPU (78
 observed), which makes every kernel slower in eager mode and adds noise to the summed kernel
 times. A sink cache has a property that sidesteps this: once full, every decode step has the same
 shapes *and the same positions*, because the new token is always at position `n_sink + window`.
-So the whole step can be captured in **one CUDA graph** and replayed, which gives **15.3–15.7 ms/token at
-every length**. A growing `DynamicCache` can't be captured that way.
+So the whole step can be captured in **one CUDA graph** and replayed, which gives **15.3–15.7 ms/token
+wall clock at every length**. A growing `DynamicCache` can't be captured that way. This is a
+separate result from the table above: it compares a graph-replayed path with nothing, and it says
+what a fixed-shape cache makes possible, not that sinks are 4× faster than a full cache.
 
-### Experiment 4: a long conversation, and what sinks don't fix
+### Experiment 4: a long conversation, and what sinks don't fix (illustration)
+
+**This is an illustration, not a measurement:** one sampled run per config, and because replies
+are sampled, the configs saw different amounts of text (4,654 / 5,668 / 2,035 tokens). See
+[Experiment 6](#experiment-6-real-dialogue) for the measured version on real dialogue.
 
 50 turns of Qwen3 chat (thinking off), streamed turn by turn. Turn 1 plants a fact:
 *"my order ID is 4417"*. It is probed at turn 3, while the fact is still in the window, and at turn 50,
@@ -293,8 +320,9 @@ expects (23.3). Their content doesn't matter, only that they exist and are visib
 
 - **Memory of evicted content.** Sinks give stable fluency over unbounded streams, not
   long-term recall (Experiment 4). Anything outside the window is gone.
-- **Quality versus a full cache.** Sinks are 5.3% worse in perplexity because the model only ever sees
-  the last 1,020 tokens. It is a fixed-budget trade-off, not free context.
+- **Quality versus a full cache.** Sinks are 6.3% worse in perplexity (in the full cache's trained
+  range), and the gap grows with distance, because the model only ever sees the last 1,020 tokens.
+  It is a fixed-budget trade-off, not free context.
 - **Prefill and chunked input.** A chunk longer than the cache gets full causal attention within
   itself, then gets trimmed. Within a chunk this is not streaming attention.
 - **Batching, beam search, rollback.** `crop` and `reorder_cache` are not supported, and the CUDA

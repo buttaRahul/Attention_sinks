@@ -6,13 +6,19 @@
 | window only (1,024) | 17.61 | 288.33 | 294.27 | 294.79 | 306.03 | 551.68 |
 | 4 sinks + 1,020 window | 17.61 | 21.06 | 23.53 | 21.83 | 21.95 | 34.06 |
 
-### Headline: perplexity relative to the full cache, over the range the full cache survived
+### Headline: perplexity relative to the full cache
 
-| range | full | sinks | sinks vs full | window only | window vs full |
-|---|---:|---:|---:|---:|---:|
-| 1,024–50,176 | 21.77 | 22.92 | +5.3% | 313.0 | 14.4× |
-| 8,192–32,768 | 20.72 | 21.83 | +5.4% | 294.8 | 14.2× |
-| 32,768–50,176 | 23.25 | 24.44 | +5.1% | 349.8 | 15.0× |
+Qwen3's max_position_embeddings is 40,960: past it the full cache is out of its trained range (the sink cache never is). The full cache ran out of memory at 50,176. CI: paired bootstrap over 1,024-token blocks (2,000 resamples).
+
+| range | full | sinks | sinks vs full | 95% CI | window only | window vs full |
+|---|---:|---:|---:|---:|---:|---:|
+| 1,024–40,960 | 20.78 | 22.09 | +6.3% | +4.7% to +8.2% | 296.8 | 14.3× |
+| 1,024–8,192 | 21.96 | 23.16 | +5.5% | +2.6% to +9.2% | 293.4 | 13.4× |
+| 8,192–16,384 | 22.61 | 23.11 | +2.2% | -0.5% to +5.6% | 327.3 | 14.5× |
+| 16,384–32,768 | 19.83 | 21.21 | +7.0% | +5.1% to +9.0% | 279.8 | 14.1× |
+| 32,768–40,960 | 19.95 | 21.95 | +10.0% | +5.4% to +14.7% | 306.0 | 15.3× |
+| 40,960–50,176 | 26.65 | 26.89 | +0.9% | -5.2% to +9.4% | 393.9 | 14.8× |
+| 1,024–50,176 | 21.77 | 22.92 | +5.3% | +3.3% to +7.4% | 313.0 | 14.4× |
 
 ### Ablation: sink count
 

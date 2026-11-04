@@ -14,6 +14,7 @@ import matplotlib.ticker
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -110,14 +111,35 @@ def plot_main():
     if "full" in runs and "sink4_w1020" in runs:
         full, sink = runs["full"][0], runs["sink4_w1020"][0]
         end = int(full.pos.max())
-        lines = ["| range | full | sinks | sinks vs full | window only | window vs full |", "|---|---:|---:|---:|---:|---:|"]
-        for lo, hi in [(1024, end), (8192, min(end, 32768)), (32768, end)]:
+        lines = ["| range | full | sinks | sinks vs full | 95% CI | window only | window vs full |",
+                 "|---|---:|---:|---:|---:|---:|---:|"]
+        for lo, hi in [(1024, 40960), (1024, 8192), (8192, 16384), (16384, 32768), (32768, 40960),
+                       (40960, end), (1024, end)]:
             f, s = mean_nll(full, lo, hi), mean_nll(sink, lo, hi)
             w = mean_nll(runs["sink0_w1024"][0], lo, hi) if "sink0_w1024" in runs else math.nan
+            ci = gap_ci(full, sink, lo, hi)
             lines.append(f"| {lo:,}–{hi:,} | {math.exp(f):.2f} | {math.exp(s):.2f} | {math.exp(s - f) - 1:+.1%} | "
-                         f"{math.exp(w):.1f} | {math.exp(w - f):.1f}× |")
-        tables.append("### Headline: perplexity relative to the full cache, over the range the full cache survived\n\n"
-                      + "\n".join(lines))
+                         f"{ci[0]:+.1%} to {ci[1]:+.1%} | {math.exp(w):.1f} | {math.exp(w - f):.1f}× |")
+        tables.append("### Headline: perplexity relative to the full cache\n\n"
+                      "Qwen3's max_position_embeddings is 40,960: past it the full cache is out of its trained "
+                      f"range (the sink cache never is). The full cache ran out of memory at {end:,}. "
+                      "CI: paired bootstrap over 1,024-token blocks (2,000 resamples).\n\n" + "\n".join(lines))
+
+
+def gap_ci(full, sink, lo, hi, block=1024, n_boot=2000, seed=0):
+    """95% CI of exp(mean NLL_sink - mean NLL_full) - 1 over [lo, hi), resampling whole blocks of
+    tokens (paired: the same blocks for both configs), since NLL is correlated along the text."""
+    m = (full.pos > lo) & (full.pos <= hi)
+    pos = full.pos[m].to_numpy()
+    d = sink.set_index("pos").nll.reindex(pos).to_numpy() - full.nll[m].to_numpy()
+    blocks = (pos - lo - 1) // block
+    sums = np.bincount(blocks, weights=d)
+    counts = np.bincount(blocks)
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, len(sums), (n_boot, len(sums)))
+    est = sums[idx].sum(1) / counts[idx].sum(1)
+    lo_q, hi_q = np.quantile(est, [0.025, 0.975])
+    return math.exp(lo_q) - 1, math.exp(hi_q) - 1
 
 
 # ------------------------------------------------------------------ experiment 1: ablations
