@@ -24,7 +24,7 @@ import time
 
 import torch
 
-from common import RESULTS, load_model, make_cache
+from common import RESULTS, cache_len, load_model, make_cache, tokens_seen
 
 SYSTEM = "You are a helpful assistant. Keep every answer to one short paragraph."
 FACT = "Hi! Before we start: my order ID is 4417, please keep it in mind. First question: how does a lighthouse lens work?"
@@ -137,8 +137,8 @@ def main():
         rec.update({
             "reply": tok.decode(reply_ids),
             "reply_tokens": len(reply_ids), "ended": ended, "distinct2": round(distinct2(reply_ids), 3),
-            "tokens_seen": (cache.tokens_seen if hasattr(cache, "tokens_seen") else cache.get_seq_length()),
-            "cache_len": cache.get_seq_length(),
+            "tokens_seen": tokens_seen(cache),
+            "cache_len": cache_len(cache),
             "alloc_mib": round(torch.cuda.memory_allocated() / 2**20, 1),
             "decode_ms_median": round(statistics.median(times), 2) if times else None,
         })

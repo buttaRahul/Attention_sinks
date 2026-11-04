@@ -31,14 +31,16 @@ def main():
     ap.add_argument("--tokens", type=int, default=65536)
     ap.add_argument("--model", default="qwen3-0.6b")
     ap.add_argument("--no-graph", action="store_true")
+    ap.add_argument("--suffix", default="", help="appended to output names, e.g. _64k")
     args = ap.parse_args()
 
     model, tok = load_model(args.model)
     ids = pg19_tokens(tok, args.model, 65536)[:, :args.tokens].cuda()
     out_dir = RESULTS / "ppl" / args.model
     out_dir.mkdir(parents=True, exist_ok=True)
-    csv = out_dir / f"{args.config}.csv"
-    mem_csv = out_dir / f"{args.config}_mem.csv"
+    name = args.config + args.suffix
+    csv = out_dir / f"{name}.csv"
+    mem_csv = out_dir / f"{name}_mem.csv"
     csv.write_text("pos,nll\n")
     mem_csv.write_text("tokens,allocated_mib,peak_mib,reserved_mib\n")
 
@@ -96,7 +98,7 @@ def main():
         "peak_mib": round(torch.cuda.max_memory_allocated() / 2**20, 1),
         "total_vram_mib": round(torch.cuda.get_device_properties(0).total_memory / 2**20),
     }
-    (out_dir / f"{args.config}.json").write_text(json.dumps(meta, indent=1))
+    (out_dir / f"{name}.json").write_text(json.dumps(meta, indent=1))
     print(meta)
 
 

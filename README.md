@@ -132,7 +132,8 @@ medians reported. Two metrics, which are **not** comparable with each other:
 On GPU time the sink cache is flat (22.5–27.8 ms at every length, run-to-run noise from laptop
 clocks) and the full cache rises 3×. At 1K the sink cache is *slower*: ~6 ms of its step is the
 "cache copies" column (the eviction kernel re-rotating 1,020 fp32 keys per layer, the value shift,
-and the fp32→bf16 key copy attention reads). [v2](#v2-move-the-sinks-not-the-window) removes it.
+and the fp32→bf16 key copy attention reads). [v2](#v2-move-the-sinks-not-the-window) is designed to
+remove it (not measured yet).
 
 **Does it match the memory-bound prediction?** Yes, once you count the bytes HF actually moves.
 Decode reads every weight (1.19 GB) and the whole KV cache once per token. The brief's
@@ -165,8 +166,8 @@ what a fixed-shape cache makes possible, not that sinks are 4× faster than a fu
 ### Experiment 4: a long conversation, and what sinks don't fix (illustration)
 
 **This is an illustration, not a measurement:** one sampled run per config, and because replies
-are sampled, the configs saw different amounts of text (4,654 / 5,668 / 2,035 tokens). See
-[Experiment 6](#experiment-6-real-dialogue) for the measured version on real dialogue.
+are sampled, the configs saw different amounts of text (4,654 / 5,668 / 2,035 tokens). [Experiments 6 and 8](#experiments-68-does-it-hold-for-a-voice-agent-code-ready-not-run-yet) are
+the controlled versions (not run yet).
 
 50 turns of Qwen3 chat (thinking off), streamed turn by turn. Turn 1 plants a fact:
 *"my order ID is 4417"*. It is probed at turn 3, while the fact is still in the window, and at turn 50,
@@ -187,6 +188,49 @@ the teacher-forced log-probability of "4417" after "Your order ID is ".
   Evicted content can only come back by re-retrieving it (RAG, summarisation, or a larger cache).
 - The window-only cache degenerates. From about turn 20 every reply is an immediate end-of-turn
   token (distinct-2 of 0.20).
+
+### Experiments 6–8: does it hold for a voice agent? (code ready, not run yet)
+
+The PG19 results are about books. A voice agent has different requirements: calls of a few thousand
+tokens, many concurrent sessions per GPU, real dialogue, and a system prompt that must hold for the
+whole call. Three experiments target this. The code is written but **none has been run yet, so
+there are no numbers here.**
+
+#### Experiment 6: real dialogue
+
+[`experiments/dialogue.py`](experiments/dialogue.py), on [LoCoMo](https://github.com/snap-research/locomo):
+10 long multi-session conversations with ~1,500 annotated questions (single-hop, multi-hop, temporal,
+open-domain), each with evidence turns. For full, sinks (v2) and window-only it measures:
+
+- perplexity on the dialogue, by position;
+- per question: the teacher-forced log p of the gold answer, plus greedy and 3 sampled answers
+  scored by LoCoMo's token F1;
+- how far back the evidence was, split by whether it is still in the window.
+
+Uncertainty comes from bootstrapping over conversations, not from a single run.
+
+#### Experiment 7: the crossover point
+
+[`experiments/crossover.py`](experiments/crossover.py) runs at session lengths of 2K, 4K, 8K and 16K. Assuming ~200 transcript tokens per minute plus
+a ~1K-token system prompt, those correspond to roughly 5-, 15-, 30- and 60-minute calls. It measures:
+
+- KV memory per session;
+- the largest number of concurrent sessions that fit in 8 GB;
+- aggregate decode throughput at that batch.
+
+Per-session GPU time against length (512 to 32K, full / v1 / v2) comes from `latency.py`.
+
+#### Experiment 8: pinned system prompt and pinned facts
+
+[`experiments/pinned.py`](experiments/pinned.py) runs a scripted 64-turn support call per seed (5 seeds,
+randomized agent name, account number, address and phone number). The transcript is generated once and
+teacher-forced, so every config sees the same tokens. Probes run at turns 6–64:
+
+- recall of system-prompt facts and of facts the caller states mid-call;
+- compliance with a rule from the system prompt ("end every reply with …").
+
+Configs, all at a 1,024-token budget: 4 sinks; `n_sink` = the whole system prompt; the system prompt
+plus 128 pinned tokens for caller turns that state a fact; and the full cache as reference.
 
 ---
 
@@ -255,12 +299,54 @@ So `SinkCache` stores keys in **fp32** by default. Attention reads a bf16 copy; 
 bf16. This costs +50% KV memory (168 MiB vs 112 MiB for 1,024 tokens). bf16 storage is still
 available (`key_dtype=None`, the `_bf16k` configs).
 
-A bf16 alternative without the drift: move the 4 sinks *forward* instead of moving the 1,020 window
-keys *back*. Window keys keep their original rotation (exact, rounded once), and each step the sinks
-are rotated directly from their stored originals to sit just before the window. RoPE only
-sees relative distances, so attention is identical. The query then sits at the absolute stream
-position, so positions grow without bound, and it needs `position_ids` fed from a device tensor to
-stay CUDA-graph-friendly. I haven't built it.
+That workaround treats the symptom. The cause is re-rotating 1,020 keys every step at all, which v2 removes.
+
+### v2: move the sinks, not the window
+
+[`src/sinkcache/cache_v2.py`](src/sinkcache/cache_v2.py), `SinkCacheV2`. The obvious question about
+v1 is "why rotate 1,020 keys per step instead of 4?". RoPE attention only depends on relative
+position, so the same attention pattern can be had the other way round:
+
+- **Window keys are never touched.** They stay exactly as the model wrote them, rotated at their
+  absolute stream positions, in bf16.
+- **The query sits at its absolute position.** `get_seq_length()` returns tokens seen, so
+  Transformers builds `position_ids` from it. `get_query_offset` / `get_mask_sizes` report the
+  in-cache size for the mask. This is the same split HF's own `StaticSlidingWindowLayer` uses.
+- **Only the sinks move.** Each step they are rotated *from their stored original keys* to sit
+  directly before the window: one rotation, one rounding, no accumulation.
+- **Eviction is O(1).** The window is a ring buffer of `window + 1` slots, and a new token overwrites
+  the slot of the one that just left. There is no shift, no re-rotation, no fp32→bf16 copy. Slot order
+  doesn't matter to attention because every key carries its position in its rotation.
+
+| | v1 (`SinkCache`) | v2 (`SinkCacheV2`) |
+|---|---|---|
+| keys rotated per step | 1,020 per layer | 4 per layer |
+| roundings per window key | one per step it lives (√n drift in bf16) | none: stored once, never modified |
+| key storage | fp32 (168 MiB for 1,024 tokens) | bf16 (112 MiB) |
+| eviction | shift the whole window | overwrite one ring slot |
+| position range | bounded (≤ cache size) | grows with the stream (fp64 angles for the sinks) |
+
+Relative distances are identical to v1, so logits match v1 to 1×10⁻³ in fp32 (`test_matches_v1`).
+The tests in [`tests/test_cache_v2.py`](tests/test_cache_v2.py) cover:
+
+- an independent reference: pre-RoPE keys recorded by hooks and rotated once by HF's code at the
+  positions v2 claims;
+- bf16 window keys bit-for-bit what the model wrote, after 236 evictions;
+- chunks longer than the window;
+- CUDA-graph replay bitwise equal to eager, including pin moves that force eager steps and recapture
+  (written; its last run hit a token-count bug in the test itself, fixed, not yet re-run).
+
+The trade-off: positions grow without bound. HF computes `position × θ` in fp32, so at very large
+positions (≫100K) the query and key angles lose precision. v1 never leaves position 1,024.
+
+The `v2` ablation (perplexity, memory, GPU time per step against v1's fp32 and bf16 keys) is set up in
+`run_ppl.sh v2` and `latency.py`, but **not run yet**.
+
+**Pinning.** v2's sink slots generalise to a *region*: sinks, plus tokens the application pins with
+`cache.pin(start, end)`. A pinned token stays in the window like any other, and when it would be
+evicted it moves into the region instead. The region is re-placed before the window each step, so
+pinned tokens look to the model as if they were said just before the window, after the sinks. This
+is what [Experiment 8](#experiment-8-pinned-system-prompt-and-pinned-facts) uses.
 
 ### Making it fast on this machine
 
@@ -382,12 +468,13 @@ triton-windows 3.9, Windows 11, bf16 weights. Full tables: [`results/tables.md`]
 
 ```
 src/sinkcache/
-  cache.py              SinkLayer / SinkCache (eviction, re-rotation, in-place buffer)
+  cache.py              v1: SinkLayer / SinkCache (eviction, re-rotation, in-place buffer)
+  cache_v2.py           v2: SinkCacheV2 (sinks moved forward, ring-buffer window, pinning)
   rope.py               RoPE helpers, reference re-rotation
   kernels.py            fused in-place shift + re-rotation (Triton)
   decode_attention.py   split-K flash-decode GQA attention backend (Triton)
   graphs.py             StreamRunner: CUDA-graph replay of steady-state decode
 tests/                  pytest suite
-experiments/            ppl.py, latency.py, chat.py, plot.py, run_ppl.sh
+experiments/            ppl.py, latency.py, chat.py, dialogue.py, crossover.py, pinned.py, plot.py, run_ppl.sh
 results/                CSVs, JSON, plots, tables.md
 ```

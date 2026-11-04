@@ -25,11 +25,11 @@ from collections import defaultdict
 import torch
 from torch.profiler import ProfilerActivity, profile
 
-from common import RESULTS, kv_bytes_per_token, load_model, make_cache, pg19_tokens
+from common import RESULTS, cache_len, kv_bytes_per_token, load_model, make_cache, pg19_tokens
 from sinkcache import StreamRunner
 
-POSITIONS = [1024, 2048, 4096, 8192, 16384, 32768]
-CONFIGS = ["full", "sink4_w1020"]
+POSITIONS = [512, 1024, 2048, 4096, 8192, 16384, 32768]
+CONFIGS = ["full", "sink4_w1020", "v2sink4_w1020"]
 CHUNK = 256
 WARMUP, TIMED, PROFILED = 10, 30, 5
 
@@ -40,7 +40,7 @@ def categorize(name: str) -> str:
         return "linear"
     if "decode_partial" in n or "decode_reduce" in n or "softmax" in n or "fmha" in n or "attention" in n:
         return "attention"
-    if "cat" in n or "copy" in n or "shift_kernel" in n:
+    if "cat" in n or "copy" in n or "shift_kernel" in n or "index" in n:
         return "cache_copy"
     return "other"
 
@@ -86,11 +86,11 @@ def run_config(model, spec, ids, positions):
             model(ids[:, done:done + n], past_key_values=cache, use_cache=True)
             done += n
         eager = measure(model, cache, tok, graph=False)
-        row = {"config": spec, "position": p, "cache_len": cache.get_seq_length(),
+        row = {"config": spec, "position": p, "cache_len": cache_len(cache),
                "eager_ms": eager["ms"], "gpu_ms": eager["gpu_ms"], "breakdown": eager["breakdown"]}
         if spec != "full":
             row["graph_ms"] = measure(model, cache, tok, graph=True)["ms"]
-        done = cache.get_seq_length() if spec == "full" else done  # full cache grew by the timed steps
+        done = cache_len(cache) if spec == "full" else done  # full cache grew by the timed steps
         rows.append(row)
         print({k: (round(v, 2) if isinstance(v, float) else v) for k, v in row.items() if k != "breakdown"},
               flush=True)
@@ -104,6 +104,7 @@ def main():
     ap.add_argument("--rounds", type=int, default=3)
     ap.add_argument("--model", default="qwen3-0.6b")
     ap.add_argument("--positions", type=int, nargs="*", default=POSITIONS)
+    ap.add_argument("--configs", nargs="*", default=CONFIGS)
     args = ap.parse_args()
 
     model, tok = load_model(args.model)
@@ -111,13 +112,14 @@ def main():
     weight_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
     rows = []
     for r in range(args.rounds):
-        order = CONFIGS[r % len(CONFIGS):] + CONFIGS[:r % len(CONFIGS)]
+        cfgs = args.configs
+        order = cfgs[r % len(cfgs):] + cfgs[:r % len(cfgs)]
         for spec in order:
             for row in run_config(model, spec, ids, args.positions):
                 rows.append({"round": r, **row})
 
     summary = []
-    for spec in CONFIGS:
+    for spec in args.configs:
         for p in args.positions:
             rs = [x for x in rows if x["config"] == spec and x["position"] == p]
             entry = {"config": spec, "position": p, "cache_len": rs[0]["cache_len"]}
